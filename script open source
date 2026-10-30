@@ -1,718 +1,491 @@
--- vector | NextUI (правильный API + патч битого source.lua + фикс загрузки)
-local NextUI
-do
-    local src = game:HttpGet("https://diser.me/nextui/source.lua")
-    local fn = loadstring(src)
-    if not fn then
-        local lines = {}
-        for line in (src .. "\n"):gmatch("([^\n]*)\n") do
-            table.insert(lines, line)
-        end
-        table.remove(lines, 4300)
-        fn = loadstring(table.concat(lines, "\n"))
-    end
-    if not fn then
-        error("[vector] Не удалось загрузить NextUI — файл по ссылке повреждён")
-    end
-    NextUI = fn()
-end
-
-local Players = game:GetService("Players")
+--!nonstrict
+-- vector | NextUI | HALOWEEN + Potions + Configs + Codes
+local Players = game:GetService('Players')
+local RS = game:GetService('ReplicatedStorage')
+local HttpService = game:GetService('HttpService')
+local StarterGui = game:GetService('StarterGui')
+local TeleportService = game:GetService('TeleportService')
 local player = Players.LocalPlayer
-local PP = game:GetService("ProximityPromptService")
-local RS = game:GetService("ReplicatedStorage")
-local StarterGui = game:GetService("StarterGui")
-local HttpService = game:GetService("HttpService")
-local UseItemRemote = RS:WaitForChild("Remotes"):WaitForChild("UseItem")
-local RedeemCodeRemote = RS:WaitForChild("Remotes"):WaitForChild("RedeemCode")
-
-local CODES_LIST = {"WELCOME", "RELEASE", "UPDATE0", "INVASION", "CARDMASTER", "FREELUCK"}
-local RARITY_ORDER = {'Common','Rare','Epic','Legendary','Limited','Mythic','Secret','???','Godly','Fusion','Evolved'}
+assert(player, '[vector] LocalPlayer unavailable')
+local Remotes = RS:WaitForChild('Remotes', 15)
+assert(Remotes, '[vector] Remotes unavailable')
+local HalloweenShop = Remotes:WaitForChild('HalloweenShop', 10)
+assert(HalloweenShop and HalloweenShop:IsA('RemoteFunction'), '[vector] HalloweenShop unavailable')
+local offer = require(RS.Modules.Halloween.HalloweenData).offer('capsule')
+assert(offer and type(offer.price) == 'number', '[vector] Capsule offer unavailable')
 
 local CONFIG = {
-    RollDelay = 2.5,
-    AfterRollWait = 3.0,
-    TargetRarities = { Mythic=true, Secret=true, ['???']=true, Godly=true },
-    UsePriceFallback = false,
-    MinPrice = 500000,
-    TeleportOffset = Vector3.new(0, 3, 3),
-    TeleportThreshold = 6,
-    MaxRollsWithoutCards = 3,
+    CapsuleInterval = 2,
     PotionThreshold = 6600,
     SuperThreshold = 6600,
     PotionCheckInterval = 30,
-    HoldExtra = 0.12,
 }
-
 local AUTO = {
     SaveEnabled = true,
     LoadEnabled = true,
     ReconnectEnabled = true,
-    ConfigName = "autosave",
-    ScriptUrl = "",
+    ConfigName = 'autosave',
+    ScriptUrl = '',
     SaveInterval = 30,
 }
+local CONFIG_FOLDER = 'NextUI/configs'
+local BOOT_FILE = 'NextUI/vector_halloween/startup.json'
+local CODES_LIST = {'WELCOME', 'RELEASE', 'UPDATE0', 'INVASION', 'CARDMASTER', 'FREELUCK'}
+local configName = 'default'
 
--- ===== HELPERS =====
-local function getMyPlot()
-    local pf = workspace:FindFirstChild("New plots")
-    if not pf then return nil end
-    for _, p in ipairs(pf:GetChildren()) do
-        if p:GetAttribute("OwnerUserId") == player.UserId then return p end
-    end
-    return nil
-end
-
-local function findPrompt(plot, name)
-    if not plot then return nil end
-    local roll = plot:FindFirstChild("ROLL")
-    local btn = roll and roll:FindFirstChild("Button")
-    return btn and btn:FindFirstChild(name)
-end
-
-local function firePrompt(prompt)
-    if not prompt or not prompt.Enabled then return false end
-    local ok = pcall(fireproximityprompt, prompt)
-    if ok then return true end
-    local a = pcall(function() firesignal(PP.PromptButtonHoldBegan, prompt, player) end)
-    task.wait((prompt.HoldDuration or 0.2) + CONFIG.HoldExtra)
-    local b = pcall(function() firesignal(PP.PromptTriggered, prompt, player) end)
-    return a and b
-end
-
-local function isMyCard(c)
-    return tonumber(c:GetAttribute("OwnerUserId")) == player.UserId
-end
-
-local function getCardRarity(c)
-    local l = c:FindFirstChild("rarity", true)
-    if not l or not l:IsA("TextLabel") then return nil end
-    local t = l.Text:gsub("^%s+", ""):gsub("%s+$", "")
-    t = t:gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b:lower() end)
-    return t
-end
-
-local function getCardPrice(c)
-    local p = c:FindFirstChild("BuyPrompt")
-    if not p then return nil end
-    return tonumber((p.ActionText:gsub("Buy %$", ""):gsub(",", "")))
-end
-
-local function teleportTo(pos)
-    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    if (hrp.Position - pos).Magnitude > CONFIG.TeleportThreshold then
-        hrp.CFrame = CFrame.new(pos + CONFIG.TeleportOffset)
-        task.wait(0.25)
+do
+    local ok, boot = pcall(function()
+        return HttpService:JSONDecode(readfile(BOOT_FILE))
+    end)
+    if ok and type(boot) == 'table' then
+        for key, default in pairs(AUTO) do
+            if type(boot[key]) == type(default) then AUTO[key] = boot[key] end
+        end
+        AUTO.SaveInterval = math.clamp(AUTO.SaveInterval, 5, 300)
     end
 end
 
--- ===== STATE =====
-local running = false
-local busy = false
-local rollAttempts = 0
-local rollSuccess = 0
-local buyCount = 0
-local emptyStreak = 0
-local lastNote = "-"
-local potionRunning = false
-local superRunning = false
+-- Use a compiled cache instead of deleting an arbitrary source line.
+local function compileNextUI()
+    local cache = 'NextUI/vector_halloween/nextui-cache.lua'
+    local ok, source = pcall(function()
+        return game:HttpGet('https://diser.me/nextui/source.lua')
+    end)
+    local reason = source
+    if ok and type(source) == 'string' then
+        local fn, err = loadstring(source, 'NextUI')
+        if fn then
+            pcall(writefile, cache, source)
+            return fn
+        end
+        reason = err
+    end
+    local cachedOK, cached = pcall(readfile, cache)
+    if cachedOK then
+        local fn = loadstring(cached, 'NextUI-cache')
+        if fn then return fn end
+    end
+    error('[vector] Не удалось загрузить NextUI: ' .. tostring(reason), 0)
+end
 
-local function Notify(title, content, duration)
+local libraryChunk = compileNextUI()
+local env = getgenv()
+local previous = env.__vector_halloween
+if type(previous) == 'table' and type(previous.Stop) == 'function' then
+    previous.Stop()
+end
+
+local Runtime = {
+    Alive = true,
+    AutoCapsule = false,
+    AutoPotion = false,
+    AutoSuper = false,
+    Bought = 0,
+    Note = 'Выключено',
+    Shop = nil,
+    NextState = 0,
+    NextBuy = 0,
+    NextPotion = 0,
+    Tasks = {},
+    Connections = {},
+}
+local NextUI
+local function stop()
+    if not Runtime.Alive then return end
+    Runtime.Alive = false
+    for _, connection in ipairs(Runtime.Connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    for _, thread in ipairs(Runtime.Tasks) do
+        if thread ~= coroutine.running() then pcall(task.cancel, thread) end
+    end
+    if NextUI then pcall(function() NextUI:Destroy() end) end
+    if env.__vector_halloween == Runtime then env.__vector_halloween = nil end
+end
+Runtime.Stop = stop
+env.__vector_halloween = Runtime
+NextUI = libraryChunk()
+assert(type(NextUI) == 'table', '[vector] Invalid NextUI library')
+
+local function spawnTask(fn)
+    local thread = task.spawn(function()
+        local ok, err = pcall(fn)
+        if not ok and Runtime.Alive then warn('[vector]', err) end
+    end)
+    table.insert(Runtime.Tasks, thread)
+    return thread
+end
+local function notify(title, text, duration)
+    if not Runtime.Alive then return end
     pcall(function()
-        StarterGui:SetCore("SendNotification", { Title = title, Text = content, Duration = duration or 3 })
+        StarterGui:SetCore('SendNotification', {
+            Title = title, Text = text, Duration = duration or 3,
+        })
     end)
 end
+local function setParagraph(element, title, content)
+    if Runtime.Alive and element then
+        pcall(function() element:Set(title, content) end)
+    end
+end
 
--- ===== WINDOW =====
 local Window = NextUI:CreateWindow({
-    Title = "vector",
-    SubTitle = "Auto Roll + Buy + Potions",
+    Title = 'vector',
+    SubTitle = 'HALOWEEN + Potions',
     Size = Vector2.new(640, 580),
-    Theme = "Dark",
+    Theme = 'Dark',
     ToggleKey = Enum.KeyCode.LeftControl,
 })
+local HalloweenTab = Window:AddTab({Title = 'HALOWEEN', Icon = 'gift'})
+local PotionsTab = Window:AddTab({Title = 'Potions', Icon = 'zap'})
+local ConfigsTab = Window:AddTab({Title = 'Configs', Icon = 'folder'})
+local CodesTab = Window:AddTab({Title = 'Codes', Icon = 'gift'})
+local SettingsTab = Window:AddTab({Title = 'Settings', Icon = 'settings'})
 
-local MainTab = Window:AddTab({ Title = "Auto Roll", Icon = "home" })
-local RaritiesTab = Window:AddTab({ Title = "Rarities", Icon = "star" })
-local PotionsTab = Window:AddTab({ Title = "Potions", Icon = "zap" })
-local ConfigsTab = Window:AddTab({ Title = "Configs", Icon = "folder" })
-local CodesTab = Window:AddTab({ Title = "Codes", Icon = "gift" })
-local SettingsTab = Window:AddTab({ Title = "Settings", Icon = "settings" })
-
--- ===== ELEMENT REGISTRY =====
-local Elements = {}
-local function Reg(flag, el)
-    if flag then Elements[flag] = el end
-    return el
+-- Only this version's controls are saved. Removed roll/rarity flags are ignored.
+local Values, Elements, Setters = {}, {}, {}
+local function bind(tab, method, options, setter)
+    local flag, default = options.Flag, options.Default
+    local function apply(value)
+        if type(value) ~= type(default) then return false end
+        if type(value) == 'number' then
+            if value ~= value or math.abs(value) == math.huge then return false end
+            value = math.clamp(value, options.Min or -math.huge, options.Max or math.huge)
+        end
+        Values[flag] = value
+        setter(value)
+        return true
+    end
+    apply(default)
+    options.Callback = apply
+    Setters[flag] = apply
+    Elements[flag] = tab[method](tab, options)
+    return Elements[flag]
+end
+local function applyFlag(flag, value)
+    local setter = Setters[flag]
+    if not setter or not setter(value) then return false end
+    Elements[flag]:Set(Values[flag], true)
+    return true
+end
+local function configPath(name)
+    assert(type(name) == 'string' and #name > 0 and #name <= 64, 'Invalid config name')
+    assert(not name:find('/', 1, true) and not name:find('\\', 1, true)
+        and not name:find('..', 1, true), 'Invalid config name')
+    return CONFIG_FOLDER .. '/' .. name .. '.json'
+end
+local function saveConfig(name)
+    local ok, err = pcall(function()
+        writefile(configPath(name), HttpService:JSONEncode(Values))
+        writefile(BOOT_FILE, HttpService:JSONEncode(AUTO))
+    end)
+    if not ok then warn('[vector] SaveConfig:', err) end
+    return ok
+end
+local function loadConfig(name)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(configPath(name)))
+    end)
+    if not ok or type(data) ~= 'table' then return false end
+    local applied = 0
+    for flag, value in pairs(data) do
+        if Setters[flag] then
+            local good, accepted = pcall(applyFlag, flag, value)
+            if good and accepted then applied = applied + 1 end
+        end
+    end
+    print(('[vector] Config loaded: %s; applied=%d'):format(name, applied))
+    return true
 end
 
--- ===== BUY LOGIC =====
-local function rarityWanted(rar)
-    if not rar then return false end
-    if CONFIG.TargetRarities[rar] then return true end
-    local lower = string.lower(rar)
-    for k, v in pairs(CONFIG.TargetRarities) do
-        if v and string.lower(k) == lower then return true end
+-- ===== HALOWEEN =====
+HalloweenTab:AddParagraph({
+    Title = 'Halloween Capsule',
+    Content = ('Цена: %s конфет за капсулу. Покупает по одной, не открывает капсулы. При нехватке конфет или отсутствии товара ждёт.'):format(tostring(offer.price)),
+})
+local halloweenStatus = HalloweenTab:AddParagraph({Title = 'Status', Content = 'Получение состояния магазина...'})
+bind(HalloweenTab, 'AddToggle', {
+    Title = 'Auto Buy Halloween Capsule',
+    Description = 'Автоматически покупать за конфеты, пока переключатель включён',
+    Flag = 'AutoHalloweenCapsule', Default = false,
+}, function(value)
+    Runtime.AutoCapsule = value
+    Runtime.NextState = 0
+    Runtime.NextBuy = 0
+    Runtime.Note = value and 'Проверка магазина...' or 'Выключено'
+end)
+bind(HalloweenTab, 'AddSlider', {
+    Title = 'Интервал покупки (сек)', Flag = 'HalloweenBuyInterval',
+    Min = 1, Max = 30, Increment = 1, Default = CONFIG.CapsuleInterval,
+}, function(value) CONFIG.CapsuleInterval = value end)
+
+local function responseError(response)
+    if type(response) == 'table' then
+        return tostring(response.reason or response.message or response.error or 'Запрос отклонён')
     end
+    return tostring(response)
+end
+local function acceptState(state)
+    if type(state) ~= 'table' or type(state.candy) ~= 'number'
+        or type(state.stock) ~= 'table' or type(state.stock.capsule) ~= 'number' then
+        return false
+    end
+    Runtime.Shop = state
+    return true
+end
+local function refreshShop()
+    Runtime.NextState = os.clock() + 10
+    local ok, response = pcall(function() return HalloweenShop:InvokeServer('state') end)
+    if not Runtime.Alive then return false end
+    if ok and type(response) == 'table' and response.ok and acceptState(response.state) then
+        return true
+    end
+    Runtime.Shop = nil
+    Runtime.Note = 'Ошибка магазина: ' .. responseError(response)
     return false
 end
-
-local function buyCard(card)
-    local bp = card:FindFirstChild("BuyPrompt")
-    if not bp then return false end
-    teleportTo(card.Position)
-    local tries = 0
-    while card.Parent and tries < 15 do
-        if bp.Enabled then
-            pcall(function() fireproximityprompt(bp) end)
-            task.wait(0.35)
-            if not card.Parent then return true end
-        end
-        tries = tries + 1
-        task.wait(0.1)
+local function capsuleStep()
+    local state = Runtime.Shop
+    local resetDue = state and type(state.resetAt) == 'number'
+        and workspace:GetServerTimeNow() >= state.resetAt
+    if os.clock() >= Runtime.NextState then
+        if not refreshShop() then return end
+    elseif resetDue then
+        -- Never buy using yesterday's stock while waiting for the next refresh.
+        Runtime.Note = 'Ожидание обновления магазина'
+        return
     end
-    return card.Parent == nil
-end
-
-local function processCards()
-    local pl = workspace:FindFirstChild("PlacedCards")
-    if not pl then return 0 end
-    local snap = {}
-    for _, c in ipairs(pl:GetChildren()) do
-        if c:IsA("BasePart") and isMyCard(c) then snap[#snap+1] = c end
+    if not Runtime.Alive or not Runtime.AutoCapsule then return end
+    state = Runtime.Shop
+    if not state then return end
+    if state.stock.capsule <= 0 then
+        Runtime.Note = 'Нет в наличии — жду обновления магазина'
+        return
     end
-    local bought = 0
-    local notes = {}
-    for _, card in ipairs(snap) do
-        if card.Parent then
-            local rar = getCardRarity(card)
-            local price = getCardPrice(card)
-            local buy = false
-            if rarityWanted(rar) then buy = true
-            elseif CONFIG.UsePriceFallback and price and price >= CONFIG.MinPrice then buy = true end
-            if buy then
-                if buyCard(card) then
-                    bought = bought + 1
-                    table.insert(notes, (rar or "?") .. " (Bought)")
-                    print("[vector] BOUGHT:", rar or "?", price or "?")
-                else
-                    table.insert(notes, (rar or "?") .. " (Fail)")
-                end
-            else
-                table.insert(notes, (rar or "?") .. " (Skip)")
-            end
-        end
+    if state.candy < offer.price then
+        Runtime.Note = 'Недостаточно конфет — жду пополнения'
+        return
     end
-    if #notes > 0 then lastNote = table.concat(notes, ", ") end
-    return bought
-end
-
-local function loop()
-    if busy then return end
-    busy = true
-    while running do
-        local ok, err = pcall(function()
-            local plot = getMyPlot()
-            if not plot then task.wait(2); return end
-            local prompt = findPrompt(plot, "SummonPrompt")
-            if not prompt then task.wait(2); return end
-
-            buyCount = buyCount + processCards()
-            if not running then return end
-
-            local spinBefore = plot:GetAttribute("SpinCount") or 0
-            rollAttempts = rollAttempts + 1
-
-            local waitReady = 0
-            while running and (not prompt.Enabled or (plot:GetAttribute("RollPhase") or "Idle") ~= "Idle") and waitReady < 10 do
-                task.wait(0.2); waitReady = waitReady + 0.2
-            end
-
-            teleportTo(prompt.Parent.Position)
-            firePrompt(prompt)
-
-            local rollAccepted = false
-            local deadline = os.clock() + CONFIG.AfterRollWait + 5
-            while os.clock() < deadline and running do
-                if (plot:GetAttribute("SpinCount") or 0) ~= spinBefore then rollAccepted = true; break end
-                task.wait(0.1)
-            end
-
-            if not rollAccepted then
-                emptyStreak = emptyStreak + 1
-                lastNote = "Roll timeout"
-                if emptyStreak >= CONFIG.MaxRollsWithoutCards then task.wait(2); emptyStreak = 0 end
-                return
-            end
-
-            local animDeadline = os.clock() + 8
-            while os.clock() < animDeadline and running do
-                if (plot:GetAttribute("RollPhase") or "Idle") == "Idle" then break end
-                task.wait(0.1)
-            end
-            task.wait(0.3)
-
-            rollSuccess = rollSuccess + 1
-            emptyStreak = 0
-            buyCount = buyCount + processCards()
-            task.wait(CONFIG.RollDelay)
-        end)
-        if not ok then warn("[vector]", err); task.wait(1) end
-    end
-    busy = false
-end
-
--- ===== MAIN TAB =====
-MainTab:AddParagraph({ Title = "Plot", Content = "Auto-detected by OwnerUserId" })
-local statusPara = MainTab:AddParagraph({ Title = "Status", Content = "Attempts: 0 | Success: 0 | Bought: 0 | -" })
-
-Reg("AutoRoll", MainTab:AddToggle({
-    Title = "Auto Roll + Buy",
-    Description = "Automatically roll and buy selected rarities",
-    Flag = "AutoRoll",
-    Default = false,
-    Callback = function(v)
-        running = v
-        if v then task.spawn(loop) end
-    end,
-}))
-
-MainTab:AddButton({
-    Title = "Roll Once",
-    Callback = function()
-        task.spawn(function()
-            local plot = getMyPlot()
-            local prompt = findPrompt(plot, "SummonPrompt")
-            if not prompt then Notify("Roll", "No prompt found", 3); return end
-            teleportTo(prompt.Parent.Position)
-            local ok = firePrompt(prompt)
-            Notify("Roll", ok and "Fired successfully" or "Failed to fire", 3)
-        end)
-    end,
-})
-
--- ===== RARITIES TAB =====
-for _, rar in ipairs(RARITY_ORDER) do
-    local flag = "Rarity_" .. rar
-    Reg(flag, RaritiesTab:AddToggle({
-        Title = rar,
-        Flag = flag,
-        Default = CONFIG.TargetRarities[rar] == true,
-        Callback = function(v) CONFIG.TargetRarities[rar] = v end,
-    }))
-end
-
-RaritiesTab:AddButton({
-    Title = "Select All",
-    Callback = function()
-        for _, r in ipairs(RARITY_ORDER) do
-            CONFIG.TargetRarities[r] = true
-            local el = Elements["Rarity_" .. r]
-            if el and el.Set then el:Set(true) end
-        end
-        Notify("Rarities", "All enabled", 3)
-    end,
-})
-
-RaritiesTab:AddButton({
-    Title = "Deselect All",
-    Callback = function()
-        for _, r in ipairs(RARITY_ORDER) do
-            CONFIG.TargetRarities[r] = false
-            local el = Elements["Rarity_" .. r]
-            if el and el.Set then el:Set(false) end
-        end
-        Notify("Rarities", "All disabled", 3)
-    end,
-})
-
--- ===== POTIONS TAB =====
-local function getPotionInfo()
-    local ends = player:GetAttribute("LuckPotionEnds") or 0
-    local remaining = math.max(0, ends - os.time())
-    local mult = player:GetAttribute("LuckMultiplier") or 1
-    local counts = { lucky = 0, super = 0 }
-    pcall(function()
-        local ui = player.PlayerGui:FindFirstChild("ui"); if not ui then return end
-        local inv = ui:FindFirstChild("inv"); if not inv then return end
-        local sf = inv:FindFirstChild("inner part")
-        sf = sf and sf:FindFirstChild("inv")
-        sf = sf and sf:FindFirstChild("ScrollingFrame")
-        if not sf then return end
-        for key, name in pairs({ lucky = "lucky_potion", super = "super_lucky_potion" }) do
-            local pot = sf:FindFirstChild(name)
-            if pot then
-                local inner = pot:FindFirstChild("trait rr")
-                inner = inner and inner:FindFirstChild("outer")
-                inner = inner and inner:FindFirstChild("inner")
-                local amt = inner and inner:FindFirstChild("amount")
-                if amt then counts[key] = tonumber((amt.Text:gsub("x", ""))) or 0 end
-            end
-        end
+    if os.clock() < Runtime.NextBuy then return end
+    Runtime.NextBuy = os.clock() + CONFIG.CapsuleInterval
+    local ok, response = pcall(function()
+        return HalloweenShop:InvokeServer('buy', 'capsule')
     end)
-    return remaining, mult, counts
+    if not Runtime.Alive then return end
+    local hasState = type(response) == 'table' and acceptState(response.state)
+    if not hasState then
+        Runtime.Shop = nil
+        Runtime.NextState = 0
+    end
+    if ok and type(response) == 'table' and response.ok then
+        Runtime.Bought = Runtime.Bought + (tonumber(offer.amount) or 1)
+        Runtime.Note = 'Halloween Capsule куплена'
+    else
+        Runtime.Note = 'Покупка отклонена: ' .. responseError(response)
+        Runtime.NextBuy = os.clock() + math.max(10, CONFIG.CapsuleInterval)
+    end
+end
+local function refreshHalloweenStatus()
+    local state = Runtime.Shop
+    local candy = state and tostring(state.candy) or '-'
+    local stock = state and tostring(state.stock.capsule) or '-'
+    setParagraph(halloweenStatus, 'Status', ('Конфеты: %s | Остаток: %s | Куплено: %d\n%s'):format(
+        candy, stock, Runtime.Bought, Runtime.AutoCapsule and Runtime.Note or 'Выключено'))
 end
 
-local function fmtTime(s) return string.format("%d:%02d", s // 60, s % 60) end
-
-local potionPara = PotionsTab:AddParagraph({ Title = "Status", Content = "Time left: - | Multiplier: - | Lucky: - | Super: -" })
-
+-- ===== POTIONS =====
+local function getPotionInfo()
+    local ends = tonumber(player:GetAttribute('LuckPotionEnds')) or 0
+    local remaining = math.max(0, math.floor(ends - os.time()))
+    local multiplier = tonumber(player:GetAttribute('LuckMultiplier')) or 1
+    local counts = {lucky = 0, super = 0}
+    local gui = player:FindFirstChildOfClass('PlayerGui')
+    local node = gui and gui:FindFirstChild('ui')
+    for _, name in ipairs({'inv', 'inner part', 'inv', 'ScrollingFrame'}) do
+        node = node and node:FindFirstChild(name)
+    end
+    if node then
+        for key, id in pairs({lucky = 'lucky_potion', super = 'super_lucky_potion'}) do
+            local amount = node:FindFirstChild(id)
+            for _, name in ipairs({'trait rr', 'outer', 'inner', 'amount'}) do
+                amount = amount and amount:FindFirstChild(name)
+            end
+            if amount and amount:IsA('TextLabel') then
+                counts[key] = tonumber((amount.Text:gsub('[xX,%s]', ''))) or 0
+            end
+        end
+    end
+    return remaining, multiplier, counts
+end
+local potionStatus = PotionsTab:AddParagraph({Title = 'Status', Content = 'Time left: - | Multiplier: - | Lucky: - | Super: -'})
 local function refreshPotionStatus()
-    local r, m, c = getPotionInfo()
-    potionPara:Set(string.format("Time left: %s | Multiplier: x%d | Lucky: %d | Super: %d", fmtTime(r), m, c.lucky, c.super))
+    local remaining, multiplier, counts = getPotionInfo()
+    setParagraph(potionStatus, 'Status', ('Time left: %d:%02d | Multiplier: x%s | Lucky: %d | Super: %d'):format(
+        remaining // 60, remaining % 60, tostring(multiplier), counts.lucky, counts.super))
 end
-
-local function useItem(id)
-    return pcall(function() return UseItemRemote:InvokeServer(id) end)
+local function usePotion(id, title)
+    local remote = Remotes:FindFirstChild('UseItem')
+    if not remote or not remote:IsA('RemoteFunction') then return end
+    local ok, response = pcall(function() return remote:InvokeServer(id) end)
+    if ok and type(response) == 'table' and response.ok then notify(title, 'Used', 3) end
 end
+bind(PotionsTab, 'AddToggle', {
+    Title = 'Auto Use Lucky Potion', Flag = 'AutoPotion', Default = false,
+    Description = 'Use when time left drops below the threshold',
+}, function(value) Runtime.AutoPotion = value; Runtime.NextPotion = 0 end)
+bind(PotionsTab, 'AddToggle', {
+    Title = 'Auto Use Super Lucky Potion', Flag = 'AutoSuper', Default = false,
+    Description = 'x4 luck for 10 minutes',
+}, function(value) Runtime.AutoSuper = value; Runtime.NextPotion = 0 end)
 
-Reg("AutoPotion", PotionsTab:AddToggle({
-    Title = "Auto Use Lucky Potion",
-    Description = "Use when time left drops below the threshold",
-    Flag = "AutoPotion",
-    Default = false,
-    Callback = function(v)
-        potionRunning = v
-        if v then
-            task.spawn(function()
-                while potionRunning do
-                    pcall(function()
-                        refreshPotionStatus()
-                        local r, _, c = getPotionInfo()
-                        if c.lucky > 0 and r < CONFIG.PotionThreshold then
-                            local ok2, res = useItem("lucky_potion")
-                            if ok2 and type(res) == "table" and res.ok then Notify("Potion", "Lucky extended", 3) end
-                            refreshPotionStatus()
-                        end
-                    end)
-                    local w = 0
-                    while w < CONFIG.PotionCheckInterval and potionRunning do task.wait(1); w = w + 1 end
-                end
-            end)
-        end
-    end,
-}))
+-- ===== CONFIGS =====
+ConfigsTab:AddParagraph({Title = 'Saved Configs', Content = 'Manual save / load by name.'})
+bind(ConfigsTab, 'AddTextbox', {
+    Title = 'Config name', Flag = 'CfgNameBox', Default = configName,
+    Placeholder = 'e.g. main', Finished = false,
+}, function(value) configName = value end)
+ConfigsTab:AddButton({Title = 'Save Config', Callback = function()
+    local ok = saveConfig(configName)
+    notify('Config', ok and ('Saved: ' .. configName) or 'Save failed (F9)')
+end})
+ConfigsTab:AddButton({Title = 'Load Config', Callback = function()
+    local name = configName
+    local ok = loadConfig(name)
+    notify('Config', ok and ('Loaded: ' .. name) or 'Load failed / file not found')
+end})
+ConfigsTab:AddDivider()
+ConfigsTab:AddParagraph({Title = 'Auto Config', Content = 'Авто-сохранение и авто-загрузка.'})
+bind(ConfigsTab, 'AddToggle', {
+    Title = 'Auto Save Config', Flag = 'AutoSave', Default = AUTO.SaveEnabled,
+}, function(value) AUTO.SaveEnabled = value end)
+bind(ConfigsTab, 'AddToggle', {
+    Title = 'Auto Load Config', Flag = 'AutoLoad', Default = AUTO.LoadEnabled,
+}, function(value) AUTO.LoadEnabled = value end)
+bind(ConfigsTab, 'AddTextbox', {
+    Title = 'Auto config name', Flag = 'AutoCfgName', Default = AUTO.ConfigName,
+    Placeholder = 'autosave', Finished = false,
+}, function(value) AUTO.ConfigName = value ~= '' and value or 'autosave' end)
+bind(ConfigsTab, 'AddSlider', {
+    Title = 'Auto save interval (sec)', Flag = 'AutoSaveInt',
+    Min = 5, Max = 300, Increment = 5, Default = AUTO.SaveInterval,
+}, function(value) AUTO.SaveInterval = value end)
+ConfigsTab:AddButton({Title = 'Save Now', Callback = function()
+    local ok = saveConfig(AUTO.ConfigName)
+    notify('Config', ok and ('Saved: ' .. AUTO.ConfigName) or 'Save failed (F9)')
+end})
+ConfigsTab:AddDivider()
+ConfigsTab:AddParagraph({Title = 'Auto Reconnect', Content = 'Возврат на тот же сервер после дисконнекта.'})
+bind(ConfigsTab, 'AddToggle', {
+    Title = 'Auto Reconnect', Flag = 'AutoReconnect', Default = AUTO.ReconnectEnabled,
+}, function(value) AUTO.ReconnectEnabled = value end)
+bind(ConfigsTab, 'AddTextbox', {
+    Title = 'Script URL', Flag = 'ScriptUrl', Default = AUTO.ScriptUrl,
+    Description = 'Ссылка на эту версию скрипта для перезапуска после реконнекта',
+    Placeholder = 'https://...', Finished = false,
+}, function(value) AUTO.ScriptUrl = value end)
 
-Reg("AutoSuper", PotionsTab:AddToggle({
-    Title = "Auto Use Super Lucky Potion",
-    Description = "x4 luck for 10 minutes",
-    Flag = "AutoSuper",
-    Default = false,
-    Callback = function(v)
-        superRunning = v
-        if v then
-            task.spawn(function()
-                while superRunning do
-                    pcall(function()
-                        refreshPotionStatus()
-                        local r, _, c = getPotionInfo()
-                        if c.super > 0 and r < CONFIG.SuperThreshold then
-                            local ok2, res = useItem("super_lucky_potion")
-                            if ok2 and type(res) == "table" and res.ok then Notify("Super Potion", "Used (x4 luck)", 3) end
-                            refreshPotionStatus()
-                        end
-                    end)
-                    local w = 0
-                    while w < CONFIG.PotionCheckInterval and superRunning do task.wait(1); w = w + 1 end
-                end
-            end)
-        end
-    end,
-}))
-
--- ===== CODES TAB =====
-CodesTab:AddParagraph({ Title = "Promo Codes", Content = "Redeem all available promo codes." })
-CodesTab:AddButton({
-    Title = "Redeem All Codes",
-    Description = "WELCOME, RELEASE, UPDATE0, INVASION, CARDMASTER, FREELUCK",
-    Callback = function()
+-- ===== CODES =====
+local redeemBusy = false
+CodesTab:AddParagraph({Title = 'Promo Codes', Content = 'Redeem all available promo codes.'})
+CodesTab:AddButton({Title = 'Redeem All Codes', Description = table.concat(CODES_LIST, ', '), Callback = function()
+    if redeemBusy then return end
+    redeemBusy = true
+    spawnTask(function()
         for _, code in ipairs(CODES_LIST) do
-            task.spawn(function()
-                pcall(function()
-                    if RedeemCodeRemote:IsA("RemoteFunction") then
-                        RedeemCodeRemote:InvokeServer(code)
-                    elseif RedeemCodeRemote:IsA("RemoteEvent") then
-                        RedeemCodeRemote:FireServer(code)
-                    end
-                end)
+            if not Runtime.Alive then break end
+            local remote = Remotes:FindFirstChild('RedeemCode')
+            pcall(function()
+                if remote and remote:IsA('RemoteFunction') then remote:InvokeServer(code)
+                elseif remote and remote:IsA('RemoteEvent') then remote:FireServer(code) end
             end)
             task.wait(0.2)
         end
-        Notify("Codes", "Finished attempting to redeem promo codes!", 3)
-    end,
-})
+        redeemBusy = false
+        notify('Codes', 'Finished attempting to redeem promo codes!')
+    end)
+end})
 
--- ===== CONFIG MANAGER (исправленный) =====
-local CONFIG_FOLDER = "NextUI/configs"
-local function ensureConfigFolder()
-    if makefolder and not isfolder("NextUI") then makefolder("NextUI") end
-    if makefolder and not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
-end
-local function configPath(name) return CONFIG_FOLDER .. "/" .. name .. ".json" end
-
-local function SaveConfig(name)
-    ensureConfigFolder()
-    local data = {}
-    for flag, value in pairs(NextUI.Flags or {}) do
-        -- пропускаем служебные *_enabled
-        if not flag:find("_enabled$") then
-            data[flag] = value
-        end
-    end
-    local ok, json = pcall(function() return HttpService:JSONEncode(data) end)
-    if not ok then
-        warn("[vector] SaveConfig JSONEncode failed:", json)
-        return false
-    end
-    local wok, werr = pcall(writefile, configPath(name), json)
-    if not wok then
-        warn("[vector] writefile failed:", werr)
-        return false
-    end
-    print("[vector] Config saved to", configPath(name), "(" .. #json .. " bytes)")
-    return true
-end
-
-local function LoadConfig(name)
-    local path = configPath(name)
-    if not (isfile and isfile(path)) then
-        print("[vector] Config not found:", path)
-        return false
-    end
-    local rok, content = pcall(readfile, path)
-    if not rok then
-        warn("[vector] readfile failed:", content)
-        return false
-    end
-    local dok, data = pcall(function() return HttpService:JSONDecode(content) end)
-    if not dok then
-        warn("[vector] JSONDecode failed:", data)
-        return false
-    end
-    local applied, missing = 0, 0
-    for flag, value in pairs(data) do
-        -- сначала пробуем через элемент
-        local el = Elements[flag]
-        if el and el.Set then
-            local ok2 = pcall(function() el:Set(value) end)
-            if ok2 then
-                applied = applied + 1
-            else
-                missing = missing + 1
-            end
-        elseif NextUI.Flags and NextUI.Flags[flag] ~= nil then
-            -- fallback: пишем напрямую в Flags (для Textbox)
-            NextUI.Flags[flag] = value
-            applied = applied + 1
-        else
-            missing = missing + 1
-        end
-    end
-    -- ФИКС: синхронизируем локальные переменные, потому что Set() на Textbox не триггерит Callback
-    if data.CfgNameBox then configName = data.CfgNameBox end
-    if data.AutoCfgName then AUTO.ConfigName = data.AutoCfgName end
-    if data.ScriptUrl then AUTO.ScriptUrl = data.ScriptUrl end
-    if data.AutoSave ~= nil then AUTO.SaveEnabled = data.AutoSave end
-    if data.AutoLoad ~= nil then AUTO.LoadEnabled = data.AutoLoad end
-    if data.AutoReconnect ~= nil then AUTO.ReconnectEnabled = data.AutoReconnect end
-    if data.DelayAfterRoll then CONFIG.RollDelay = data.DelayAfterRoll end
-    if data.WaitForCards then CONFIG.AfterRollWait = data.WaitForCards end
-    if data.PriceFallback ~= nil then CONFIG.UsePriceFallback = data.PriceFallback end
-    if data.MinPrice then CONFIG.MinPrice = data.MinPrice end
-    -- Rarity флаги
-    for _, r in ipairs(RARITY_ORDER) do
-        local key = "Rarity_" .. r
-        if data[key] ~= nil then
-            CONFIG.TargetRarities[r] = data[key]
-        end
-    end
-    -- AutoRoll: синхронизируем состояние и запускаем loop если был включён
-    if data.AutoRoll ~= nil then
-        running = data.AutoRoll
-        if data.AutoRoll then task.spawn(loop) end
-    end
-    if data.AutoPotion ~= nil then potionRunning = data.AutoPotion end
-    if data.AutoSuper ~= nil then superRunning = data.AutoSuper end
-    print(("[vector] Config loaded from %s: applied=%d missing=%d"):format(path, applied, missing))
-    return true
-end
-
--- ===== CONFIGS TAB =====
-local configName = "default"
-
-ConfigsTab:AddParagraph({ Title = "Saved Configs", Content = "Manual save / load by name." })
-Reg("CfgNameBox", ConfigsTab:AddTextbox({
-    Title = "Config name",
-    Default = "default",
-    Placeholder = "e.g. main",
-    Flag = "CfgNameBox",
-    Callback = function(v) configName = v end,
-}))
-ConfigsTab:AddButton({
-    Title = "Save Config",
-    Callback = function()
-        local ok = SaveConfig(configName or "default")
-        Notify("Config", ok and ("Saved: " .. (configName or "default")) or "Save failed (check F9)", 3)
-    end,
-})
-ConfigsTab:AddButton({
-    Title = "Load Config",
-    Callback = function()
-        local ok = LoadConfig(configName or "default")
-        Notify("Config", ok and ("Loaded: " .. (configName or "default")) or "Load failed (check F9)", 3)
-    end,
-})
-
-ConfigsTab:AddDivider()
-
-ConfigsTab:AddParagraph({ Title = "Auto Config", Content = "Авто-сохранение и авто-загрузка." })
-Reg("AutoSave", ConfigsTab:AddToggle({
-    Title = "Auto Save Config",
-    Flag = "AutoSave",
-    Default = AUTO.SaveEnabled,
-    Callback = function(v) AUTO.SaveEnabled = v end,
-}))
-Reg("AutoLoad", ConfigsTab:AddToggle({
-    Title = "Auto Load Config",
-    Flag = "AutoLoad",
-    Default = AUTO.LoadEnabled,
-    Callback = function(v) AUTO.LoadEnabled = v end,
-}))
-Reg("AutoCfgName", ConfigsTab:AddTextbox({
-    Title = "Auto config name",
-    Flag = "AutoCfgName",
-    Default = AUTO.ConfigName,
-    Placeholder = "autosave",
-    Callback = function(v) if v and v ~= "" then AUTO.ConfigName = v end end,
-}))
-Reg("AutoSaveInt", ConfigsTab:AddSlider({
-    Title = "Auto save interval (sec)",
-    Flag = "AutoSaveInt",
-    Min = 5, Max = 300, Default = 30, Increment = 5,
-    Callback = function(v) AUTO.SaveInterval = v end,
-}))
-ConfigsTab:AddButton({
-    Title = "Save Now",
-    Callback = function()
-        local ok = SaveConfig(AUTO.ConfigName)
-        Notify("Config", ok and ("Saved: " .. AUTO.ConfigName) or "Save failed (check F9)", 3)
-    end,
-})
-
-ConfigsTab:AddDivider()
-
-ConfigsTab:AddParagraph({ Title = "Auto Reconnect", Content = "Возврат на тот же сервер после дисконнекта." })
-Reg("AutoReconnect", ConfigsTab:AddToggle({
-    Title = "Auto Reconnect",
-    Flag = "AutoReconnect",
-    Default = AUTO.ReconnectEnabled,
-    Callback = function(v) AUTO.ReconnectEnabled = v end,
-}))
-Reg("ScriptUrl", ConfigsTab:AddTextbox({
-    Title = "Script URL",
-    Description = "Опционально: ссылка на этот скрипт для перезапуска после реконнекта",
-    Flag = "ScriptUrl",
-    Default = AUTO.ScriptUrl,
-    Placeholder = "https://...",
-    Callback = function(v) AUTO.ScriptUrl = v end,
-}))
-
--- ===== SETTINGS TAB =====
-Reg("DelayAfterRoll", SettingsTab:AddSlider({
-    Title = "Delay after roll",
-    Flag = "DelayAfterRoll",
-    Min = 1, Max = 10, Default = 2.5, Increment = 0.5,
-    Callback = function(v) CONFIG.RollDelay = v end,
-}))
-Reg("WaitForCards", SettingsTab:AddSlider({
-    Title = "Wait for cards",
-    Flag = "WaitForCards",
-    Min = 1, Max = 10, Default = 3, Increment = 0.5,
-    Callback = function(v) CONFIG.AfterRollWait = v end,
-}))
-Reg("PriceFallback", SettingsTab:AddToggle({
-    Title = "Buy by price (fallback)",
-    Flag = "PriceFallback",
-    Default = false,
-    Callback = function(v) CONFIG.UsePriceFallback = v end,
-}))
-Reg("MinPrice", SettingsTab:AddSlider({
-    Title = "Min price (fallback)",
-    Flag = "MinPrice",
-    Min = 0, Max = 5000000, Default = 500000, Increment = 10000,
-    Callback = function(v) CONFIG.MinPrice = v end,
-}))
-
-SettingsTab:AddDivider()
-
+-- ===== SETTINGS =====
+SettingsTab:AddParagraph({Title = 'Interface', Content = 'LeftControl — показать / скрыть меню.'})
 SettingsTab:AddButton({
-    Title = "Close Script",
-    Description = "Stops everything and unloads the menu (saves config)",
+    Title = 'Close Script', Description = 'Stops everything and unloads the menu (saves config)',
     Callback = function()
-        SaveConfig(AUTO.ConfigName)
-        running = false; potionRunning = false; superRunning = false
-        task.wait(0.3)
-        Window:Destroy()
+        saveConfig(AUTO.ConfigName)
+        stop()
     end,
 })
-
--- ===== AUTO FEATURES =====
-task.spawn(function()
-    task.wait(1.5)
-    if AUTO.LoadEnabled then
-        print("[vector] Auto-loading config:", AUTO.ConfigName)
-        LoadConfig(AUTO.ConfigName)
-    else
-        print("[vector] Auto-load disabled")
-    end
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(AUTO.SaveInterval)
-        if AUTO.SaveEnabled then
-            print("[vector] Auto-saving config:", AUTO.ConfigName)
-            SaveConfig(AUTO.ConfigName)
-        end
-    end
-end)
 
 -- ===== AUTO RECONNECT =====
 do
-    local lp = Players.LocalPlayer
-    local pid = game.PlaceId
-    local jid = game.JobId
+    local placeId, jobId = game.PlaceId, game.JobId
     local reconnecting = false
-    local function setQueueTeleport()
-        if AUTO.ScriptUrl ~= "" then
-            pcall(queue_on_teleport, 'loadstring(game:HttpGet("' .. AUTO.ScriptUrl .. '"))()')
-        end
-    end
-    local function doReconnect()
-        if reconnecting or not AUTO.ReconnectEnabled then return end
+    local function reconnect()
+        if not Runtime.Alive or not AUTO.ReconnectEnabled or reconnecting then return end
         reconnecting = true
-        setQueueTeleport()
+        if AUTO.ScriptUrl ~= '' and type(queue_on_teleport) == 'function' then
+            pcall(queue_on_teleport, ('loadstring(game:HttpGet(%q))()'):format(AUTO.ScriptUrl))
+        end
         task.wait(0.15)
-        local ok = pcall(function() game:GetService("TeleportService"):TeleportToPlaceInstance(pid, jid) end)
-        if not ok then pcall(function() game:GetService("TeleportService"):Teleport(pid) end) end
-    end
-    pcall(function()
-        lp.AncestryChanged:Connect(function(_, newParent)
-            if newParent == nil then task.delay(0.15, doReconnect) end
+        if not Runtime.Alive or not AUTO.ReconnectEnabled then return end
+        local ok = pcall(function()
+            TeleportService:TeleportToPlaceInstance(placeId, jobId, player)
         end)
-    end)
+        if not ok then pcall(function() TeleportService:Teleport(placeId, player) end) end
+    end
+    table.insert(Runtime.Connections, player.AncestryChanged:Connect(function(_, parent)
+        if parent == nil then spawnTask(reconnect) end
+    end))
 end
 
--- ===== STATUS TICK =====
-task.spawn(function()
-    while true do
-        task.wait(1)
-        if statusPara then
-            statusPara:Set(string.format("Attempts: %d | Success: %d | Bought: %d | %s", rollAttempts, rollSuccess, buyCount, lastNote))
+-- Load before starting workers; changing toggles never spawns another worker.
+if AUTO.LoadEnabled then loadConfig(AUTO.ConfigName) end
+spawnTask(function()
+    while Runtime.Alive do
+        local ok, err = pcall(capsuleStep)
+        if not ok then
+            Runtime.Note = 'Ошибка: ' .. tostring(err)
+            Runtime.Shop = nil
+            Runtime.NextState = os.clock() + 10
+            Runtime.NextBuy = os.clock() + 10
         end
+        task.wait(0.25)
     end
 end)
-
-refreshPotionStatus()
-Notify("vector", "Loaded on NextUI (check F9 for config logs)", 4)
+spawnTask(function()
+    while Runtime.Alive do
+        if (Runtime.AutoPotion or Runtime.AutoSuper) and os.clock() >= Runtime.NextPotion then
+            Runtime.NextPotion = os.clock() + CONFIG.PotionCheckInterval
+            local ok, err = pcall(function()
+                local remaining, _, counts = getPotionInfo()
+                if Runtime.Alive and Runtime.AutoPotion and counts.lucky > 0 and remaining < CONFIG.PotionThreshold then
+                    usePotion('lucky_potion', 'Potion')
+                end
+                remaining, _, counts = getPotionInfo()
+                if Runtime.Alive and Runtime.AutoSuper and counts.super > 0 and remaining < CONFIG.SuperThreshold then
+                    usePotion('super_lucky_potion', 'Super Potion')
+                end
+            end)
+            if not ok then warn('[vector] Potions:', err) end
+        end
+        task.wait(0.5)
+    end
+end)
+spawnTask(function()
+    local lastSave = os.clock()
+    while Runtime.Alive do
+        if AUTO.SaveEnabled and os.clock() - lastSave >= AUTO.SaveInterval then
+            saveConfig(AUTO.ConfigName)
+            lastSave = os.clock()
+        end
+        task.wait(1)
+    end
+end)
+spawnTask(function()
+    while Runtime.Alive do
+        refreshHalloweenStatus()
+        refreshPotionStatus()
+        task.wait(1)
+    end
+end)
+notify('vector', 'HALOWEEN loaded — Auto Buy Halloween Capsule', 4)
+return Runtime

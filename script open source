@@ -1,4 +1,4 @@
---!nonstrict
+
 -- vector | NextUI | HALOWEEN + Potions + Configs + Codes
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')

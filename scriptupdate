@@ -1,0 +1,491 @@
+
+-- vector | NextUI | HALOWEEN + Potions + Configs + Codes
+local Players = game:GetService('Players')
+local RS = game:GetService('ReplicatedStorage')
+local HttpService = game:GetService('HttpService')
+local StarterGui = game:GetService('StarterGui')
+local TeleportService = game:GetService('TeleportService')
+local player = Players.LocalPlayer
+assert(player, '[vector] LocalPlayer unavailable')
+local Remotes = RS:WaitForChild('Remotes', 15)
+assert(Remotes, '[vector] Remotes unavailable')
+local HalloweenShop = Remotes:WaitForChild('HalloweenShop', 10)
+assert(HalloweenShop and HalloweenShop:IsA('RemoteFunction'), '[vector] HalloweenShop unavailable')
+local offer = require(RS.Modules.Halloween.HalloweenData).offer('capsule')
+assert(offer and type(offer.price) == 'number', '[vector] Capsule offer unavailable')
+
+local CONFIG = {
+    CapsuleInterval = 2,
+    PotionThreshold = 6600,
+    SuperThreshold = 6600,
+    PotionCheckInterval = 30,
+}
+local AUTO = {
+    SaveEnabled = true,
+    LoadEnabled = true,
+    ReconnectEnabled = true,
+    ConfigName = 'autosave',
+    ScriptUrl = '',
+    SaveInterval = 30,
+}
+local CONFIG_FOLDER = 'NextUI/configs'
+local BOOT_FILE = 'NextUI/vector_halloween/startup.json'
+local CODES_LIST = {'WELCOME', 'RELEASE', 'UPDATE0', 'INVASION', 'CARDMASTER', 'FREELUCK'}
+local configName = 'default'
+
+do
+    local ok, boot = pcall(function()
+        return HttpService:JSONDecode(readfile(BOOT_FILE))
+    end)
+    if ok and type(boot) == 'table' then
+        for key, default in pairs(AUTO) do
+            if type(boot[key]) == type(default) then AUTO[key] = boot[key] end
+        end
+        AUTO.SaveInterval = math.clamp(AUTO.SaveInterval, 5, 300)
+    end
+end
+
+-- Use a compiled cache instead of deleting an arbitrary source line.
+local function compileNextUI()
+    local cache = 'NextUI/vector_halloween/nextui-cache.lua'
+    local ok, source = pcall(function()
+        return game:HttpGet('https://diser.me/nextui/source.lua')
+    end)
+    local reason = source
+    if ok and type(source) == 'string' then
+        local fn, err = loadstring(source, 'NextUI')
+        if fn then
+            pcall(writefile, cache, source)
+            return fn
+        end
+        reason = err
+    end
+    local cachedOK, cached = pcall(readfile, cache)
+    if cachedOK then
+        local fn = loadstring(cached, 'NextUI-cache')
+        if fn then return fn end
+    end
+    error('[vector] Не удалось загрузить NextUI: ' .. tostring(reason), 0)
+end
+
+local libraryChunk = compileNextUI()
+local env = getgenv()
+local previous = env.__vector_halloween
+if type(previous) == 'table' and type(previous.Stop) == 'function' then
+    previous.Stop()
+end
+
+local Runtime = {
+    Alive = true,
+    AutoCapsule = false,
+    AutoPotion = false,
+    AutoSuper = false,
+    Bought = 0,
+    Note = 'Выключено',
+    Shop = nil,
+    NextState = 0,
+    NextBuy = 0,
+    NextPotion = 0,
+    Tasks = {},
+    Connections = {},
+}
+local NextUI
+local function stop()
+    if not Runtime.Alive then return end
+    Runtime.Alive = false
+    for _, connection in ipairs(Runtime.Connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    for _, thread in ipairs(Runtime.Tasks) do
+        if thread ~= coroutine.running() then pcall(task.cancel, thread) end
+    end
+    if NextUI then pcall(function() NextUI:Destroy() end) end
+    if env.__vector_halloween == Runtime then env.__vector_halloween = nil end
+end
+Runtime.Stop = stop
+env.__vector_halloween = Runtime
+NextUI = libraryChunk()
+assert(type(NextUI) == 'table', '[vector] Invalid NextUI library')
+
+local function spawnTask(fn)
+    local thread = task.spawn(function()
+        local ok, err = pcall(fn)
+        if not ok and Runtime.Alive then warn('[vector]', err) end
+    end)
+    table.insert(Runtime.Tasks, thread)
+    return thread
+end
+local function notify(title, text, duration)
+    if not Runtime.Alive then return end
+    pcall(function()
+        StarterGui:SetCore('SendNotification', {
+            Title = title, Text = text, Duration = duration or 3,
+        })
+    end)
+end
+local function setParagraph(element, title, content)
+    if Runtime.Alive and element then
+        pcall(function() element:Set(title, content) end)
+    end
+end
+
+local Window = NextUI:CreateWindow({
+    Title = 'vector',
+    SubTitle = 'HALOWEEN + Potions',
+    Size = Vector2.new(640, 580),
+    Theme = 'Dark',
+    ToggleKey = Enum.KeyCode.LeftControl,
+})
+local HalloweenTab = Window:AddTab({Title = 'HALOWEEN', Icon = 'gift'})
+local PotionsTab = Window:AddTab({Title = 'Potions', Icon = 'zap'})
+local ConfigsTab = Window:AddTab({Title = 'Configs', Icon = 'folder'})
+local CodesTab = Window:AddTab({Title = 'Codes', Icon = 'gift'})
+local SettingsTab = Window:AddTab({Title = 'Settings', Icon = 'settings'})
+
+-- Only this version's controls are saved. Removed roll/rarity flags are ignored.
+local Values, Elements, Setters = {}, {}, {}
+local function bind(tab, method, options, setter)
+    local flag, default = options.Flag, options.Default
+    local function apply(value)
+        if type(value) ~= type(default) then return false end
+        if type(value) == 'number' then
+            if value ~= value or math.abs(value) == math.huge then return false end
+            value = math.clamp(value, options.Min or -math.huge, options.Max or math.huge)
+        end
+        Values[flag] = value
+        setter(value)
+        return true
+    end
+    apply(default)
+    options.Callback = apply
+    Setters[flag] = apply
+    Elements[flag] = tab[method](tab, options)
+    return Elements[flag]
+end
+local function applyFlag(flag, value)
+    local setter = Setters[flag]
+    if not setter or not setter(value) then return false end
+    Elements[flag]:Set(Values[flag], true)
+    return true
+end
+local function configPath(name)
+    assert(type(name) == 'string' and #name > 0 and #name <= 64, 'Invalid config name')
+    assert(not name:find('/', 1, true) and not name:find('\\', 1, true)
+        and not name:find('..', 1, true), 'Invalid config name')
+    return CONFIG_FOLDER .. '/' .. name .. '.json'
+end
+local function saveConfig(name)
+    local ok, err = pcall(function()
+        writefile(configPath(name), HttpService:JSONEncode(Values))
+        writefile(BOOT_FILE, HttpService:JSONEncode(AUTO))
+    end)
+    if not ok then warn('[vector] SaveConfig:', err) end
+    return ok
+end
+local function loadConfig(name)
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(configPath(name)))
+    end)
+    if not ok or type(data) ~= 'table' then return false end
+    local applied = 0
+    for flag, value in pairs(data) do
+        if Setters[flag] then
+            local good, accepted = pcall(applyFlag, flag, value)
+            if good and accepted then applied = applied + 1 end
+        end
+    end
+    print(('[vector] Config loaded: %s; applied=%d'):format(name, applied))
+    return true
+end
+
+-- ===== HALOWEEN =====
+HalloweenTab:AddParagraph({
+    Title = 'Halloween Capsule',
+    Content = ('Цена: %s конфет за капсулу. Покупает по одной, не открывает капсулы. При нехватке конфет или отсутствии товара ждёт.'):format(tostring(offer.price)),
+})
+local halloweenStatus = HalloweenTab:AddParagraph({Title = 'Status', Content = 'Получение состояния магазина...'})
+bind(HalloweenTab, 'AddToggle', {
+    Title = 'Auto Buy Halloween Capsule',
+    Description = 'Автоматически покупать за конфеты, пока переключатель включён',
+    Flag = 'AutoHalloweenCapsule', Default = false,
+}, function(value)
+    Runtime.AutoCapsule = value
+    Runtime.NextState = 0
+    Runtime.NextBuy = 0
+    Runtime.Note = value and 'Проверка магазина...' or 'Выключено'
+end)
+bind(HalloweenTab, 'AddSlider', {
+    Title = 'Интервал покупки (сек)', Flag = 'HalloweenBuyInterval',
+    Min = 1, Max = 30, Increment = 1, Default = CONFIG.CapsuleInterval,
+}, function(value) CONFIG.CapsuleInterval = value end)
+
+local function responseError(response)
+    if type(response) == 'table' then
+        return tostring(response.reason or response.message or response.error or 'Запрос отклонён')
+    end
+    return tostring(response)
+end
+local function acceptState(state)
+    if type(state) ~= 'table' or type(state.candy) ~= 'number'
+        or type(state.stock) ~= 'table' or type(state.stock.capsule) ~= 'number' then
+        return false
+    end
+    Runtime.Shop = state
+    return true
+end
+local function refreshShop()
+    Runtime.NextState = os.clock() + 10
+    local ok, response = pcall(function() return HalloweenShop:InvokeServer('state') end)
+    if not Runtime.Alive then return false end
+    if ok and type(response) == 'table' and response.ok and acceptState(response.state) then
+        return true
+    end
+    Runtime.Shop = nil
+    Runtime.Note = 'Ошибка магазина: ' .. responseError(response)
+    return false
+end
+local function capsuleStep()
+    local state = Runtime.Shop
+    local resetDue = state and type(state.resetAt) == 'number'
+        and workspace:GetServerTimeNow() >= state.resetAt
+    if os.clock() >= Runtime.NextState then
+        if not refreshShop() then return end
+    elseif resetDue then
+        -- Never buy using yesterday's stock while waiting for the next refresh.
+        Runtime.Note = 'Ожидание обновления магазина'
+        return
+    end
+    if not Runtime.Alive or not Runtime.AutoCapsule then return end
+    state = Runtime.Shop
+    if not state then return end
+    if state.stock.capsule <= 0 then
+        Runtime.Note = 'Нет в наличии — жду обновления магазина'
+        return
+    end
+    if state.candy < offer.price then
+        Runtime.Note = 'Недостаточно конфет — жду пополнения'
+        return
+    end
+    if os.clock() < Runtime.NextBuy then return end
+    Runtime.NextBuy = os.clock() + CONFIG.CapsuleInterval
+    local ok, response = pcall(function()
+        return HalloweenShop:InvokeServer('buy', 'capsule')
+    end)
+    if not Runtime.Alive then return end
+    local hasState = type(response) == 'table' and acceptState(response.state)
+    if not hasState then
+        Runtime.Shop = nil
+        Runtime.NextState = 0
+    end
+    if ok and type(response) == 'table' and response.ok then
+        Runtime.Bought = Runtime.Bought + (tonumber(offer.amount) or 1)
+        Runtime.Note = 'Halloween Capsule куплена'
+    else
+        Runtime.Note = 'Покупка отклонена: ' .. responseError(response)
+        Runtime.NextBuy = os.clock() + math.max(10, CONFIG.CapsuleInterval)
+    end
+end
+local function refreshHalloweenStatus()
+    local state = Runtime.Shop
+    local candy = state and tostring(state.candy) or '-'
+    local stock = state and tostring(state.stock.capsule) or '-'
+    setParagraph(halloweenStatus, 'Status', ('Конфеты: %s | Остаток: %s | Куплено: %d\n%s'):format(
+        candy, stock, Runtime.Bought, Runtime.AutoCapsule and Runtime.Note or 'Выключено'))
+end
+
+-- ===== POTIONS =====
+local function getPotionInfo()
+    local ends = tonumber(player:GetAttribute('LuckPotionEnds')) or 0
+    local remaining = math.max(0, math.floor(ends - os.time()))
+    local multiplier = tonumber(player:GetAttribute('LuckMultiplier')) or 1
+    local counts = {lucky = 0, super = 0}
+    local gui = player:FindFirstChildOfClass('PlayerGui')
+    local node = gui and gui:FindFirstChild('ui')
+    for _, name in ipairs({'inv', 'inner part', 'inv', 'ScrollingFrame'}) do
+        node = node and node:FindFirstChild(name)
+    end
+    if node then
+        for key, id in pairs({lucky = 'lucky_potion', super = 'super_lucky_potion'}) do
+            local amount = node:FindFirstChild(id)
+            for _, name in ipairs({'trait rr', 'outer', 'inner', 'amount'}) do
+                amount = amount and amount:FindFirstChild(name)
+            end
+            if amount and amount:IsA('TextLabel') then
+                counts[key] = tonumber((amount.Text:gsub('[xX,%s]', ''))) or 0
+            end
+        end
+    end
+    return remaining, multiplier, counts
+end
+local potionStatus = PotionsTab:AddParagraph({Title = 'Status', Content = 'Time left: - | Multiplier: - | Lucky: - | Super: -'})
+local function refreshPotionStatus()
+    local remaining, multiplier, counts = getPotionInfo()
+    setParagraph(potionStatus, 'Status', ('Time left: %d:%02d | Multiplier: x%s | Lucky: %d | Super: %d'):format(
+        remaining // 60, remaining % 60, tostring(multiplier), counts.lucky, counts.super))
+end
+local function usePotion(id, title)
+    local remote = Remotes:FindFirstChild('UseItem')
+    if not remote or not remote:IsA('RemoteFunction') then return end
+    local ok, response = pcall(function() return remote:InvokeServer(id) end)
+    if ok and type(response) == 'table' and response.ok then notify(title, 'Used', 3) end
+end
+bind(PotionsTab, 'AddToggle', {
+    Title = 'Auto Use Lucky Potion', Flag = 'AutoPotion', Default = false,
+    Description = 'Use when time left drops below the threshold',
+}, function(value) Runtime.AutoPotion = value; Runtime.NextPotion = 0 end)
+bind(PotionsTab, 'AddToggle', {
+    Title = 'Auto Use Super Lucky Potion', Flag = 'AutoSuper', Default = false,
+    Description = 'x4 luck for 10 minutes',
+}, function(value) Runtime.AutoSuper = value; Runtime.NextPotion = 0 end)
+
+-- ===== CONFIGS =====
+ConfigsTab:AddParagraph({Title = 'Saved Configs', Content = 'Manual save / load by name.'})
+bind(ConfigsTab, 'AddTextbox', {
+    Title = 'Config name', Flag = 'CfgNameBox', Default = configName,
+    Placeholder = 'e.g. main', Finished = false,
+}, function(value) configName = value end)
+ConfigsTab:AddButton({Title = 'Save Config', Callback = function()
+    local ok = saveConfig(configName)
+    notify('Config', ok and ('Saved: ' .. configName) or 'Save failed (F9)')
+end})
+ConfigsTab:AddButton({Title = 'Load Config', Callback = function()
+    local name = configName
+    local ok = loadConfig(name)
+    notify('Config', ok and ('Loaded: ' .. name) or 'Load failed / file not found')
+end})
+ConfigsTab:AddDivider()
+ConfigsTab:AddParagraph({Title = 'Auto Config', Content = 'Авто-сохранение и авто-загрузка.'})
+bind(ConfigsTab, 'AddToggle', {
+    Title = 'Auto Save Config', Flag = 'AutoSave', Default = AUTO.SaveEnabled,
+}, function(value) AUTO.SaveEnabled = value end)
+bind(ConfigsTab, 'AddToggle', {
+    Title = 'Auto Load Config', Flag = 'AutoLoad', Default = AUTO.LoadEnabled,
+}, function(value) AUTO.LoadEnabled = value end)
+bind(ConfigsTab, 'AddTextbox', {
+    Title = 'Auto config name', Flag = 'AutoCfgName', Default = AUTO.ConfigName,
+    Placeholder = 'autosave', Finished = false,
+}, function(value) AUTO.ConfigName = value ~= '' and value or 'autosave' end)
+bind(ConfigsTab, 'AddSlider', {
+    Title = 'Auto save interval (sec)', Flag = 'AutoSaveInt',
+    Min = 5, Max = 300, Increment = 5, Default = AUTO.SaveInterval,
+}, function(value) AUTO.SaveInterval = value end)
+ConfigsTab:AddButton({Title = 'Save Now', Callback = function()
+    local ok = saveConfig(AUTO.ConfigName)
+    notify('Config', ok and ('Saved: ' .. AUTO.ConfigName) or 'Save failed (F9)')
+end})
+ConfigsTab:AddDivider()
+ConfigsTab:AddParagraph({Title = 'Auto Reconnect', Content = 'Возврат на тот же сервер после дисконнекта.'})
+bind(ConfigsTab, 'AddToggle', {
+    Title = 'Auto Reconnect', Flag = 'AutoReconnect', Default = AUTO.ReconnectEnabled,
+}, function(value) AUTO.ReconnectEnabled = value end)
+bind(ConfigsTab, 'AddTextbox', {
+    Title = 'Script URL', Flag = 'ScriptUrl', Default = AUTO.ScriptUrl,
+    Description = 'Ссылка на эту версию скрипта для перезапуска после реконнекта',
+    Placeholder = 'https://...', Finished = false,
+}, function(value) AUTO.ScriptUrl = value end)
+
+-- ===== CODES =====
+local redeemBusy = false
+CodesTab:AddParagraph({Title = 'Promo Codes', Content = 'Redeem all available promo codes.'})
+CodesTab:AddButton({Title = 'Redeem All Codes', Description = table.concat(CODES_LIST, ', '), Callback = function()
+    if redeemBusy then return end
+    redeemBusy = true
+    spawnTask(function()
+        for _, code in ipairs(CODES_LIST) do
+            if not Runtime.Alive then break end
+            local remote = Remotes:FindFirstChild('RedeemCode')
+            pcall(function()
+                if remote and remote:IsA('RemoteFunction') then remote:InvokeServer(code)
+                elseif remote and remote:IsA('RemoteEvent') then remote:FireServer(code) end
+            end)
+            task.wait(0.2)
+        end
+        redeemBusy = false
+        notify('Codes', 'Finished attempting to redeem promo codes!')
+    end)
+end})
+
+-- ===== SETTINGS =====
+SettingsTab:AddParagraph({Title = 'Interface', Content = 'LeftControl — показать / скрыть меню.'})
+SettingsTab:AddButton({
+    Title = 'Close Script', Description = 'Stops everything and unloads the menu (saves config)',
+    Callback = function()
+        saveConfig(AUTO.ConfigName)
+        stop()
+    end,
+})
+
+-- ===== AUTO RECONNECT =====
+do
+    local placeId, jobId = game.PlaceId, game.JobId
+    local reconnecting = false
+    local function reconnect()
+        if not Runtime.Alive or not AUTO.ReconnectEnabled or reconnecting then return end
+        reconnecting = true
+        if AUTO.ScriptUrl ~= '' and type(queue_on_teleport) == 'function' then
+            pcall(queue_on_teleport, ('loadstring(game:HttpGet(%q))()'):format(AUTO.ScriptUrl))
+        end
+        task.wait(0.15)
+        if not Runtime.Alive or not AUTO.ReconnectEnabled then return end
+        local ok = pcall(function()
+            TeleportService:TeleportToPlaceInstance(placeId, jobId, player)
+        end)
+        if not ok then pcall(function() TeleportService:Teleport(placeId, player) end) end
+    end
+    table.insert(Runtime.Connections, player.AncestryChanged:Connect(function(_, parent)
+        if parent == nil then spawnTask(reconnect) end
+    end))
+end
+
+-- Load before starting workers; changing toggles never spawns another worker.
+if AUTO.LoadEnabled then loadConfig(AUTO.ConfigName) end
+spawnTask(function()
+    while Runtime.Alive do
+        local ok, err = pcall(capsuleStep)
+        if not ok then
+            Runtime.Note = 'Ошибка: ' .. tostring(err)
+            Runtime.Shop = nil
+            Runtime.NextState = os.clock() + 10
+            Runtime.NextBuy = os.clock() + 10
+        end
+        task.wait(0.25)
+    end
+end)
+spawnTask(function()
+    while Runtime.Alive do
+        if (Runtime.AutoPotion or Runtime.AutoSuper) and os.clock() >= Runtime.NextPotion then
+            Runtime.NextPotion = os.clock() + CONFIG.PotionCheckInterval
+            local ok, err = pcall(function()
+                local remaining, _, counts = getPotionInfo()
+                if Runtime.Alive and Runtime.AutoPotion and counts.lucky > 0 and remaining < CONFIG.PotionThreshold then
+                    usePotion('lucky_potion', 'Potion')
+                end
+                remaining, _, counts = getPotionInfo()
+                if Runtime.Alive and Runtime.AutoSuper and counts.super > 0 and remaining < CONFIG.SuperThreshold then
+                    usePotion('super_lucky_potion', 'Super Potion')
+                end
+            end)
+            if not ok then warn('[vector] Potions:', err) end
+        end
+        task.wait(0.5)
+    end
+end)
+spawnTask(function()
+    local lastSave = os.clock()
+    while Runtime.Alive do
+        if AUTO.SaveEnabled and os.clock() - lastSave >= AUTO.SaveInterval then
+            saveConfig(AUTO.ConfigName)
+            lastSave = os.clock()
+        end
+        task.wait(1)
+    end
+end)
+spawnTask(function()
+    while Runtime.Alive do
+        refreshHalloweenStatus()
+        refreshPotionStatus()
+        task.wait(1)
+    end
+end)
+notify('vector', 'HALOWEEN loaded — Auto Buy Halloween Capsule', 4)
+return Runtime
